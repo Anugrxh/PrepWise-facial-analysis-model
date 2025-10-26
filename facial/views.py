@@ -45,12 +45,14 @@ def preprocess_face(face_roi):
 def analyze_frame_batch(frames, face_cascade, model):
     """Process multiple frames in batch for better performance"""
     emotions_data = []
+    faces_detected = 0
     
-    for frame in frames:
+    for i, frame in enumerate(frames):
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         faces = face_cascade.detectMultiScale(gray, 1.3, 5)
         
         if len(faces) > 0:
+            faces_detected += 1
             # Take the largest face
             face = max(faces, key=lambda x: x[2] * x[3])
             x, y, w, h = face
@@ -63,7 +65,13 @@ def analyze_frame_batch(frames, face_cascade, model):
             # Convert to emotion dictionary
             emotion_dict = {EMOTION_LABELS[i]: float(emotion_pred[i] * 100) for i in range(len(EMOTION_LABELS))}
             emotions_data.append(emotion_dict)
+            
+            # Log first few detections
+            if i < 3:
+                dominant_emotion = max(emotion_dict, key=emotion_dict.get)
+                print(f"   Frame {i+1}: Face detected, dominant emotion: {dominant_emotion} ({emotion_dict[dominant_emotion]:.1f}%)")
     
+    print(f"👤 Face detection summary: {faces_detected}/{len(frames)} frames had detectable faces")
     return emotions_data
 
 def generate_interview_feedback(avg_emotions, confidence, eye_contact, speech_clarity, overall_score):
@@ -197,7 +205,10 @@ def generate_interview_feedback(avg_emotions, confidence, eye_contact, speech_cl
 
 def calculate_metrics(emotions_list):
     """Calculate aggregated metrics from emotion data"""
+    print(f"📊 Calculating metrics from {len(emotions_list)} emotion samples...")
+    
     if not emotions_list:
+        print(f"❌ No emotion data available - no faces detected")
         return {
             "confidence": 0,
             "emotions": {label: 0 for label in EMOTION_LABELS},
@@ -233,6 +244,12 @@ def calculate_metrics(emotions_list):
     # Calculate overall score with weighted importance
     overall_score = int((confidence * 0.4 + eye_contact * 0.3 + speech_clarity * 0.3))
     
+    print(f"📊 Calculated metrics:")
+    print(f"   Confidence: {confidence}% (from max emotion: {max_emotion_score:.1f}%)")
+    print(f"   Eye Contact: {eye_contact}% (estimated)")
+    print(f"   Speech Clarity: {speech_clarity}% (estimated)")
+    print(f"   Overall Score: {overall_score}%")
+    
     # Generate comprehensive interview feedback
     detailed_feedback = generate_interview_feedback(avg_emotions, confidence, eye_contact, speech_clarity, overall_score)
     
@@ -258,11 +275,23 @@ def facial_analysis(request):
         
         video_file = request.FILES['video']
         
-        # Save video to temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as temp_file:
+        # Debug: Log what we received
+        print(f"🎥 Django received file:")
+        print(f"   Name: {video_file.name}")
+        print(f"   Size: {video_file.size} bytes")
+        print(f"   Content-Type: {video_file.content_type}")
+        print(f"   Size KB: {video_file.size / 1024:.1f} KB")
+        
+        # Save video to temporary file with correct extension
+        file_extension = '.webm' if 'webm' in video_file.content_type else '.mp4'
+        print(f"🎥 Using file extension: {file_extension}")
+        
+        with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension) as temp_file:
             for chunk in video_file.chunks():
                 temp_file.write(chunk)
             temp_video_path = temp_file.name
+            
+        print(f"🎥 Saved to temporary file: {temp_video_path}")
         
         try:
             # Load models
@@ -270,22 +299,36 @@ def facial_analysis(request):
             face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + 'haarcascade_frontalface_default.xml')
             
             # Open video
+            print(f"🎥 Attempting to open video with OpenCV: {temp_video_path}")
             cap = cv2.VideoCapture(temp_video_path)
             
             if not cap.isOpened():
+                print(f"❌ OpenCV failed to open video file")
+                print(f"   File exists: {os.path.exists(temp_video_path)}")
+                print(f"   File size: {os.path.getsize(temp_video_path) if os.path.exists(temp_video_path) else 'N/A'}")
                 return Response(
-                    {"error": "Could not open video file"}, 
+                    {"error": f"Could not open video file. Format: {video_file.content_type}, Size: {video_file.size}"}, 
                     status=status.HTTP_400_BAD_REQUEST
                 )
+            
+            print(f"✅ OpenCV successfully opened video file")
             
             # Get video properties for optimization
             fps = cap.get(cv2.CAP_PROP_FPS)
             total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            duration = total_frames / fps if fps > 0 else 0
+            
+            print(f"🎥 Video properties:")
+            print(f"   FPS: {fps}")
+            print(f"   Total frames: {total_frames}")
+            print(f"   Duration: {duration:.1f} seconds")
             
             # Sample frames for faster processing (every 5th frame)
             frame_skip = max(1, int(fps / 6))  # Process ~6 frames per second
             frames_to_process = []
             frame_count = 0
+            
+            print(f"🎥 Processing every {frame_skip} frames...")
             
             while True:
                 ret, frame = cap.read()
@@ -302,12 +345,39 @@ def facial_analysis(request):
                 frame_count += 1
             
             cap.release()
+            print(f"🎥 Collected {len(frames_to_process)} frames for analysis")
             
             # Process frames in batch
             emotions_list = analyze_frame_batch(frames_to_process, face_cascade, model)
+            print(f"🎥 Processed {len(frames_to_process)} frames, found {len(emotions_list)} with faces")
             
             # Calculate final metrics
             result = calculate_metrics(emotions_list)
+            
+            # Log the complete facial analysis result
+            print(f"\n{'='*60}")
+            print(f"🎯 FACIAL ANALYSIS RESULT")
+            print(f"{'='*60}")
+            print(f"📊 Confidence: {result['confidence']}%")
+            print(f"👁️  Eye Contact: {result['eyeContact']}%")
+            print(f"🗣️  Speech Clarity: {result['speechClarity']}%")
+            print(f"⭐ Overall Score: {result['overallScore']}%")
+            
+            if result.get('emotions'):
+                print(f"\n😊 EMOTIONS BREAKDOWN:")
+                for emotion, percentage in result['emotions'].items():
+                    print(f"   {emotion.capitalize()}: {percentage:.1f}%")
+            
+            if result.get('feedback'):
+                print(f"\n💬 FEEDBACK:")
+                # Split feedback into readable sections
+                feedback_sections = result['feedback'].split('|') if '|' in result['feedback'] else [result['feedback']]
+                for i, section in enumerate(feedback_sections[:3], 1):  # Show first 3 sections
+                    print(f"   {i}. {section.strip()[:100]}{'...' if len(section.strip()) > 100 else ''}")
+            
+            print(f"{'='*60}")
+            print(f"✅ Facial analysis completed successfully")
+            print(f"{'='*60}\n")
             
             return Response({
                 "facialAnalysisResult": result
